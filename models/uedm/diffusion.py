@@ -12,6 +12,7 @@ class UEDM(nn.Module):
         self.beta_end = config.get('beta_end', 0.02)
         self.max_nodes = config.get('max_nodes', 50)
         self.max_pocket_nodes = config.get('max_pocket_nodes', 100)
+        self.node_dim = config.get('node_dim', 16)
         
         # Линейное расписание шума
         self.betas = torch.linspace(self.beta_start, self.beta_end, self.num_timesteps)
@@ -24,79 +25,69 @@ class UEDM(nn.Module):
         
         # Модуль для обработки кармана
         self.pocket_encoder = nn.Sequential(
-            nn.Linear(16 + 3, self.config['hidden_dim']),  # Типы атомов + координаты
+            nn.Linear(self.node_dim + 3, self.config['hidden_dim']),
             nn.ReLU(),
             nn.Linear(self.config['hidden_dim'], self.config['hidden_dim'])
         )
     
-    def forward(self, x, coords, pocket_x, pocket_coords, edge_index, edge_attr, t):
-        """
-        Прямой проход для обучения.
-        x: Признаки узлов молекулы [batch_size, num_nodes, node_dim]
-        coords: Координаты атомов молекулы [batch_size, num_nodes, 3]
-        pocket_x: Признаки узлов кармана [batch_size, num_pocket_nodes, node_dim]
-        pocket_coords: Координаты атомов кармана [batch_size, num_pocket_nodes, 3]
-        edge_index: Индексы ребер [2, num_edges]
-        edge_attr: Признаки ребер [num_edges, edge_dim]
-        t: Шаг диффузии [batch_size]
-        """
-        # Кодирование кармана
+    def forward(self, x, coords, pocket_x, pocket_coords, t):
         pocket_features = torch.cat([pocket_x, pocket_coords], dim=-1)
-        pocket_embed = self.pocket_encoder(pocket_features)  # [batch_size, num_pocket_nodes, hidden_dim]
-        
-        # Прогон через EGCN с учетом кармана (пока просто передаем признаки молекулы)
-        denoised_x, denoised_coords = self.egcn(x, coords, edge_index, edge_attr, t)
-        
-        # Предсказание связей
+        pocket_embed = self.pocket_encoder(pocket_features)
+        denoised_x, denoised_coords, edge_index, edge_attr = self.egcn(x, coords, pocket_x, pocket_coords, t)
         bond_probs = self.bond_predictor(denoised_x, denoised_coords)
-        
-        return denoised_x, denoised_coords, bond_probs
+        return denoised_x, denoised_coords, bond_probs, edge_index, edge_attr
     
     def add_noise(self, x, coords, t):
-        """
-        Прямой процесс диффузии: добавление шума.
-        """
         noise = torch.randn_like(x)
         sqrt_alpha_bar = torch.sqrt(self.alpha_bars[t]).view(-1, 1, 1)
         sqrt_one_minus_alpha_bar = torch.sqrt(1 - self.alpha_bars[t]).view(-1, 1, 1)
-        
         noisy_x = sqrt_alpha_bar * x + sqrt_one_minus_alpha_bar * noise
         noisy_coords = sqrt_alpha_bar * coords + sqrt_one_minus_alpha_bar * torch.randn_like(coords)
-        
         return noisy_x, noisy_coords, noise
     
-    def sample(self, pocket_x, pocket_coords, num_samples, device='cuda'):
+    def sample(self, pocket_x, pocket_coords, num_samples, device='cuda', use_ddim=False, ddim_steps=50):
         """
         Генерация молекул с учетом белкового кармана.
-        pocket_x: Признаки узлов кармана [batch_size, num_pocket_nodes, node_dim]
-        pocket_coords: Координаты атомов кармана [batch_size, num_pocket_nodes, 3]
+        use_ddim: Использовать DDIM для ускоренного сэмплинга.
+        ddim_steps: Количество шагов для DDIM (меньше num_timesteps).
         """
-        # Инициализация шума
-        x = torch.randn(num_samples, self.max_nodes, self.config['node_dim']).to(device)
+        x = torch.randn(num_samples, self.max_nodes, self.node_dim).to(device)
         coords = torch.randn(num_samples, self.max_nodes, 3).to(device)
-        
-        # Подготовка данных кармана
         pocket_x = pocket_x.to(device)
         pocket_coords = pocket_coords.to(device)
         
-        # Обратный процесс диффузии
-        for t in reversed(range(self.num_timesteps)):
-            t_tensor = torch.full((num_samples,), t, dtype=torch.long, device=device)
-            denoised_x, denoised_coords, bond_probs = self.forward(
-                x, coords, pocket_x, pocket_coords, None, None, t_tensor
-            )
-            
-            # Обновление x и coords
-            alpha = self.alphas[t]
-            x = (1 / torch.sqrt(alpha)) * (x - (1 - alpha) / torch.sqrt(1 - self.alpha_bars[t]) * denoised_x)
-            coords = (1 / torch.sqrt(alpha)) * (coords - (1 - alpha) / torch.sqrt(1 - self.alpha_bars[t]) * denoised_coords)
-            
-            # Добавление шума на промежуточных шагах
-            if t > 0:
-                x += torch.sqrt(self.betas[t]) * torch.randn_like(x)
-                coords += torch.sqrt(self.betas[t]) * torch.randn_like(coords)
+        if use_ddim:
+            # DDIM: выбор подмножества шагов
+            step_indices = torch.linspace(0, self.num_timesteps-1, steps=ddim_steps, dtype=torch.long)
+            tau = step_indices.tolist()
+            for i in range(len(tau)-1, -1, -1):
+                t = torch.full((num_samples,), tau[i], dtype=torch.long, device=device)
+                denoised_x, denoised_coords, bond_probs, _, _ = self.forward(
+                    x, coords, pocket_x, pocket_coords, t
+                )
+                
+                # DDIM update
+                alpha_bar_t = self.alpha_bars[t].view(-1, 1, 1)
+                alpha_bar_prev = self.alpha_bars[max(0, t-1)].view(-1, 1, 1) if i > 0 else torch.ones_like(alpha_bar_t)
+                sigma = torch.zeros_like(alpha_bar_t)  # Без стохастической компоненты
+                pred_x0 = (x - torch.sqrt(1 - alpha_bar_t) * denoised_x) / torch.sqrt(alpha_bar_t)
+                x = torch.sqrt(alpha_bar_prev) * pred_x0 + torch.sqrt(1 - alpha_bar_prev - sigma**2) * denoised_x + sigma * torch.randn_like(x)
+                
+                pred_coords0 = (coords - torch.sqrt(1 - alpha_bar_t) * denoised_coords) / torch.sqrt(alpha_bar_t)
+                coords = torch.sqrt(alpha_bar_prev) * pred_coords0 + torch.sqrt(1 - alpha_bar_prev - sigma**2) * denoised_coords + sigma * torch.randn_like(coords)
+        else:
+            # Стандартный DDPM
+            for t in reversed(range(self.num_timesteps)):
+                t_tensor = torch.full((num_samples,), t, dtype=torch.long, device=device)
+                denoised_x, denoised_coords, bond_probs, _, _ = self.forward(
+                    x, coords, pocket_x, pocket_coords, t_tensor
+                )
+                alpha = self.alphas[t]
+                x = (1 / torch.sqrt(alpha)) * (x - (1 - alpha) / torch.sqrt(1 - self.alpha_bars[t]) * denoised_x)
+                coords = (1 / torch.sqrt(alpha)) * (coords - (1 - alpha) / torch.sqrt(1 - self.alpha_bars[t]) * denoised_coords)
+                if t > 0:
+                    x += torch.sqrt(self.betas[t]) * torch.randn_like(x)
+                    coords += torch.sqrt(self.betas[t]) * torch.randn_like(coords)
         
-        # Финальное предсказание связей
         final_bonds = self.bond_predictor(x, coords)
-        
         return x, coords, final_bonds
