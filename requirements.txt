@@ -1,0 +1,8 @@
+torch>=1.10.0
+torch-geometric
+e3nn
+rdkit
+openbabel
+numpy
+scikit-learn
+stable-baselines3

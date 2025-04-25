@@ -1,0 +1,5 @@
+agent:
+  type: PPO
+  params:
+    learning_rate: 0.001
+    gamma: 0.99
