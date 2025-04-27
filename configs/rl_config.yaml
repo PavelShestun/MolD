@@ -1,5 +1,19 @@
-agent:
-  type: PPO
-  params:
-    learning_rate: 0.001
-    gamma: 0.99
+rl:
+  max_nodes: 50
+  max_steps: 100
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gamma: 0.99
+  total_timesteps: 10000
+  uedm:
+    hidden_dim: 128
+    num_layers: 5
+    max_nodes: 50
+    max_pocket_nodes: 100
+    node_dim: 16
+    num_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    cutoff: 5.0
