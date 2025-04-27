@@ -1,5 +1,18 @@
+data:
+  root: 'data/CrossDocked'
 model:
-  type: UEDM
   params:
     hidden_dim: 128
     num_layers: 5
+    max_nodes: 10
+    max_pocket_nodes: 20
+    node_dim: 16
+    num_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    cutoff: 5.0
+training:
+  num_epochs: 10
+  batch_size: 2
+  lr: 0.0001
+  save_freq: 5
