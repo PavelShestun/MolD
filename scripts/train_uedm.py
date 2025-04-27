@@ -44,6 +44,10 @@ def train():
                 pocket_coords = batch.pocket_pos.view(-1, config['model']['params']['max_pocket_nodes'], 3)
                 true_bonds = batch.bonds.view(-1, config['model']['params']['max_nodes'], config['model']['params']['max_nodes'])
                 
+                # Нормализация данных
+                x = (x - x.mean(dim=1, keepdim=True)) / (x.std(dim=1, keepdim=True) + 1e-6)
+                coords = coords - coords.mean(dim=1, keepdim=True)
+                
                 batch_size = x.size(0)
                 t = torch.randint(0, model.num_timesteps, (batch_size,), device=device)
                 
@@ -65,7 +69,7 @@ def train():
                 total_loss += loss.item()
                 num_batches += 1
             except Exception as e:
-                print(f"Пропуск батча: {str(e)}")
+                print(f"=post: Пропуск батча: {str(e)}")
                 continue
         
         if num_batches > 0:
